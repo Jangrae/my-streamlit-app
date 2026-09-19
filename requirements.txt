@@ -1,3 +1,9 @@
-streamlit>=1.40
-openai>=1.66
-requests
+streamlit
+langchain-core
+langchain-community
+langchain-openai
+langchain-text-splitters
+langchain-chroma==1.1.0
+chromadb==1.5.9
+pymupdf
+pysqlite3-binary
