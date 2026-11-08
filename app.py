@@ -1,204 +1,142 @@
 
-import os, base64, json, requests
+import os
+import uuid
+import base64
+from typing import Literal
+
 import streamlit as st
-from openai import OpenAI
+from pydantic import BaseModel, Field
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_core.chat_history import InMemoryChatMessageHistory
 
-# 히스토리 개수 제한
-MAX_HISTORY = 10
+# 상담 티켓 JSON 구조
+class SupportTicket(BaseModel):
+    product_model: str | None = Field(default=None, description="문의 대상 제품 모델명 (대화에 없으면 null)")
+    category: Literal["제품 오류", "필터/소모품", "앱 연결", "사용 방법", "기타"] = Field(description="문의 유형")
+    core_issue: str = Field(description="고객 문의의 핵심 내용을 한 문장으로 요약")
+    sentiment: Literal["긍정", "중립", "부정"] = Field(description="상담 중 고객의 전반적인 감정")
+    urgency: int = Field(description="처리 긴급도 (1~5점, 5점이 가장 긴급)", ge=1, le=5)
+    resolved: bool = Field(description="상담 중 매뉴얼 안내만으로 문제가 해결되었는지 여부")
+    needs_agent: bool = Field(description="상담원의 후속 연락이나 조치가 필요한지 여부")
+    next_action: str = Field(description="상담원이 이어서 해야 할 조치 (필요 없으면 '없음')")
 
-# OpenAI 클라이언트 생성
-client = OpenAI()
+# 매뉴얼 읽기 (앱 시작 시 한 번만 실행)
+@st.cache_resource
+def load_manual():
+    with open("manual.txt", "r", encoding="utf-8") as f:
+        return f.read()
+
+# 체인 생성 (앱 시작 시 한 번만 실행)
+@st.cache_resource
+def create_chains():
+    # 상담 체인
+    s_msg = """당신은 클린웨이브 고객센터의 상담원입니다.
+아래 [제품 매뉴얼]에 있는 내용만 근거로 답변하세요.
+
+[답변 규칙]
+1. 친절하고 간결하게 3~5문장 이내로 답변합니다.
+2. 조치 방법에 순서가 있으면 번호를 붙여 안내합니다.
+3. 매뉴얼에 없는 내용(수리비, 환불, 배송, 타사 제품 비교 등)은 추측하지 말고 "담당 부서 확인 후 안내드리겠습니다."라고 답합니다.
+4. 고객이 불편을 표현하면 먼저 공감하는 말을 한 문장 덧붙입니다.
+
+[제품 매뉴얼]
+{manual}"""
+    messages = [("system", s_msg), MessagesPlaceholder("history"), ("human", "{question}")]
+    chat_chain = ChatPromptTemplate.from_messages(messages) | ChatOpenAI(model="gpt-4o-mini", temperature=0.3)
+
+    # 이미지 판독 체인
+    s_msg = "당신은 가전제품 사진과 앱 화면을 판독하는 전문가입니다. 이미지에 보이는 사실만 객관적으로 기술하세요."
+    h_msg = [
+        {"type": "text", "text": "이미지에서 확인되는 제품 모델명, 화면에 표시된 코드나 문구, 켜져 있는 표시등과 그 색상을 항목별로 정리하세요. 원인 추측이나 해결 방법은 쓰지 마세요."},
+        {"type": "image_url", "image_url": {"url": "{image_url}"}},
+    ]
+    image_chain = ChatPromptTemplate.from_messages([("system", s_msg), ("human", h_msg)]) | ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+    # 티켓 생성 체인
+    s_msg = "당신은 고객 상담 내용을 분석해 상담 티켓을 작성하는 CS 품질 관리 전문가입니다."
+    h_msg = "다음 상담 대화를 분석해 상담 티켓을 작성하세요.\n\n{conversation}"
+    ticket_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.1)
+    ticket_chain = ChatPromptTemplate.from_messages([("system", s_msg), ("human", h_msg)]) | ticket_llm.with_structured_output(SupportTicket)
+
+    return chat_chain, image_chain, ticket_chain
 
 # 페이지 설정
-st.set_page_config(page_title="AI 개인비서", page_icon="🤖", layout="wide")
-st.title("🤖 AI 개인비서 AIVLE")
-st.write("안녕하세요? AI 개인비서 에이블입니다.")
+st.set_page_config(page_title="클린웨이브 고객센터", page_icon="🌀")
+st.title("🌀 클린웨이브 고객센터")
+st.caption("AP-300 공기청정기 상담 챗봇")
 
-# 사이드 바에 AI 비서 이미지 표시
+manual = load_manual()
+chat_chain, image_chain, ticket_chain = create_chains()
+
+# 세션 상태 초기화
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
+    st.session_state.history = InMemoryChatMessageHistory()
+    st.session_state.last_image_id = None
+    st.session_state.ticket = None
+
+# 대화를 기억하는 체인 (히스토리는 st.session_state에 저장)
+chain = RunnableWithMessageHistory(
+    chat_chain,
+    lambda session_id: st.session_state.history,
+    input_messages_key="question",
+    history_messages_key="history"
+)
+
+# 사이드바: 이미지 첨부, 상담 종료
 with st.sidebar:
-    st.image(
-        "https://raw.githubusercontent.com/Jangrae/img/master/ai_robot.png"
-    )
-    st.markdown(
-        "<h3 style='text-align: center;'>음성으로 업무를 지시하세요.</h3>",
-        unsafe_allow_html=True
-    )
+    uploaded = st.file_uploader("제품 사진 / 화면 캡처 첨부", type=["png", "jpg", "jpeg"])
+    if uploaded:
+        st.image(uploaded)
 
-# 도구 정의
-tools = [{
-    "type": "function",
-    "name": "send_email",
-    "description": "이메일을 발송합니다.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "to": {
-                "type": "string",
-                "description": "이메일 수신자. 예: 'test@gmail.com'"
-            },
-            "subject": {
-                "type": "string",
-                "description": "이메일 제목. 예: '마케팅 전략 초안'"
-            },
-            "body": {
-                "type": "string",
-                "description": "이메일 본문. 예: '안녕하세요? 김대리입니다.'"
-            }
-        },
-        "required": ["to", "subject", "body"],
-        "additionalProperties": False
-    },
-    "strict": True
-}]
+    st.divider()
+    if st.button("상담 종료 및 티켓 생성", type="primary"):
+        conversation = ""
+        for msg in st.session_state.history.messages:
+            if msg.type == "human":
+                conversation += f"고객: {msg.content}\n"
+            else:
+                conversation += f"상담원: {msg.content}\n"
+        if conversation:
+            with st.spinner("티켓 생성 중..."):
+                st.session_state.ticket = ticket_chain.invoke({"conversation": conversation})
 
-# 함수 만들기
-def send_email(to, subject, body):
-    s = smtplib.SMTP('smtp.gmail.com', 587)
-    s.starttls()
-    s.login(os.getenv("GMAIL_ADDRESS"), os.getenv("GMAIL_APP_PASSWORD"))
-    
-    # 본문
-    msg = MIMEText(body)
+    if st.session_state.ticket:
+        st.subheader("📋 상담 티켓")
+        st.json(st.session_state.ticket.model_dump())
 
-    # 제목
-    msg['Subject'] = subject
+    if st.button("새 상담 시작"):
+        st.session_state.clear()
+        st.rerun()
 
-    # 메일 보내기
-    s.sendmail(os.getenv("GMAIL_ADDRESS"), to, msg.as_string())
-    s.quit()
+# 기존 대화 출력
+for msg in st.session_state.history.messages:
+    role = "user" if msg.type == "human" else "assistant"
+    with st.chat_message(role):
+        st.markdown(msg.content)
 
-# 역할 지정
-sys_role = """
-당신은 '김 대리'의 개인 비서 '에이블'입니다.
-김대리가 요청한 업무를 최선을 다해 처리합니다.
-답변은 실제 비서가 답변하듯 정중해야 합니다.
-다음과 같은 업무를 주로 담당하게 됩니다.
-[담당 업무]
-- 미팅 내용 요약
-- 김 대리 업무 파악
-- 이메일 작성 및 발송
-- 번역
-- 기타 질문에 대한 답변
-"""
+# 사용자 입력
+user_input = st.chat_input("문의 내용을 입력하세요...")
 
-# 상태 초기화
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+if user_input:
+    question = user_input
 
-# 업무지시 입력 영역
-with st.form("task_form"):
-    uploaded_file = st.file_uploader("텍스트 파일 업로드", type=["txt"])
-    audio_value = st.audio_input("무엇을 도와드릴까요?")
-    submit = st.form_submit_button("업무지시 실행")
+    # 새로 첨부된 이미지가 있으면 판독 결과를 질문에 붙이기 (같은 이미지는 한 번만 판독)
+    if uploaded and uploaded.file_id != st.session_state.last_image_id:
+        b64 = base64.b64encode(uploaded.getvalue()).decode("utf-8")
+        data_url = f"data:{uploaded.type};base64,{b64}"
+        with st.spinner("이미지 판독 중..."):
+            image_result = image_chain.invoke({"image_url": data_url})
+        question = f"[고객 첨부 이미지 판독 결과]\n{image_result.content}\n\n[고객 질문]\n{user_input}"
+        st.session_state.last_image_id = uploaded.file_id
 
-# 버튼을 눌렀을 때만 실행
-if submit:
-    # 업로드 된 파일이 있으면 디코딩
-    text = ""
-    if uploaded_file is not None:
-        text = uploaded_file.read().decode("utf-8")
+    with st.chat_message("user"):
+        st.markdown(question)
 
-    # 녹음이 없으면 녹음 요청
-    if audio_value is None:
-        st.warning("음성을 녹음해주세요.")
-        st.stop()
-
-    # STT: 음성 → 텍스트
-    with st.spinner("음성을 텍스트로 변환 중입니다..."):
-        transcript = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=("audio.wav", audio_value, "audio/wav")
-        )
-
-    # 지시사항 출력 (확인용)
-    st.subheader("지시사항")
-    st.write(transcript.text)
-
-    # 사용자 메시지 저장
-    st.session_state.messages.append({"role": "user", "content": transcript.text})
-
-    # 최근 10개 히스토리 추출
-    history = st.session_state.messages[-MAX_HISTORY:]
-
-    # 시스템 메세지
-    system_content = sys_role
-    if text:
-        system_content += f"\n\n다음 내용을 참고하세요:\n{text}"
-    input_messages = [{"role": "system", "content": system_content}]
-
-    # 시스템 메세지 + 히스토리
-    input_messages += history
-
-    with st.spinner("답변을 준비하고 있습니다..."):
-        # LLM 호출
-        response = client.responses.create(
-            model="gpt-4o-mini",
-            input=input_messages,
-            tools=tools,
-            tool_choice="auto"
-        )
-
-        # 도구 필요 여부 확인
-        tool_calls = [
-            item for item in response.output
-            if item.type == "function_call"
-        ]
-
-        # 도구가 필요없는 경우
-        if not tool_calls:
-            # 답변 출력
-            answer = response.output_text
-        # 도구가 필요한 경우
-        else:
-            # LLM이 요청한 도구 실행
-            tool_outputs = []
-            for item in tool_calls:
-                if item.type == "function_call":
-                    args = json.loads(item.arguments)
-
-                    if item.name == "send_email":
-                        try:
-                            args["to"] = "bestmct@naver.com"
-                            result = send_email(**args)
-                        except Exception as e:
-                            result = {"status": "error", "message": str(e)}
-
-                        tool_outputs.append({
-                            "type": "function_call_output",
-                            "call_id": item.call_id,
-                            "output": json.dumps(result, ensure_ascii=False)
-                        })
-
-            # 도구 수행 결과를 LLM에 다시 전달
-            final_response = client.responses.create(
-                model="gpt-4o-mini",
-                previous_response_id=response.id,
-                input=tool_outputs
-            )
-
-            # LLM 최종 답변
-            answer = final_response.output_text
-
-        # 응답 저장
-        st.session_state.messages.append({"role": "assistant", "content": answer})
-
-        # 최근 히스토리 10개만 저장
-        st.session_state.messages = st.session_state.messages[-MAX_HISTORY:]
-
-        # TTS: 텍스트 → 음성
-        try:
-            speech = client.audio.speech.create(
-                model="tts-1",
-                voice="nova",
-                input=answer
-            )
-            audio_bytes = speech.content
-
-            # 음성 출력(자동 재생)
-            st.subheader("AI 음성 답변")
-            st.audio(audio_bytes, format="audio/mp3", autoplay=True)
-        except:
-            st.warning("음성 생성에 실패했습니다.")
-
-        # 텍스트 출력 (확인용)
-        st.write(answer)
+    with st.chat_message("assistant"):
+        with st.spinner("답변 작성 중..."):
+            cfg = {"configurable": {"session_id": st.session_state.session_id}}
+            response = chain.invoke({"manual": manual, "question": question}, config=cfg)
+        st.markdown(response.content)
