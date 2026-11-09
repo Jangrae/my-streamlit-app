@@ -19,9 +19,9 @@ def get_chain():
 
     # 벡터 저장소
     vectorstore = Chroma(
-        collection_name="ai_ethics",
+        collection_name="eduverse_faq",
         embedding_function=embedding,
-        persist_directory="chroma_db"
+        persist_directory="chroma_db2"
     )
 
     # 검색기 구성
@@ -53,8 +53,8 @@ def get_chain():
 chain = get_chain()
 
 # 페이지 설정
-st.set_page_config(page_title="RAG 챗봇", page_icon="🏢")
-st.title("🏢 생성형 AI 윤리 가이드 챗봇")
+st.set_page_config(page_title="FAQ 챗봇", page_icon="💬")
+st.title("💬 EduVerse Academy FAQ 챗봇")
 
 # 세션 상태 초기화
 if "messages" not in st.session_state:
