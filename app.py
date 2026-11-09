@@ -21,7 +21,7 @@ def get_chain():
     vectorstore = Chroma(
         collection_name="eduverse_faq",
         embedding_function=embedding,
-        persist_directory="chroma_db2"
+        persist_directory="chroma_db"
     )
 
     # 검색기 구성
