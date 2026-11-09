@@ -19,14 +19,14 @@ def get_chain():
 
     # 벡터 저장소
     vectorstore = Chroma(
-        collection_name="ai_ethics",
+        collection_name="hr_rules",
         embedding_function=embedding,
         persist_directory="chroma_db"
     )
 
     # 검색기 구성
     retriever = vectorstore.as_retriever()
-
+    
     # 체인 구성
     s_msg = """
     1. 반드시 제공된 문서 내용(context)에 근거하여 답변하세요.
@@ -54,7 +54,7 @@ chain = get_chain()
 
 # 페이지 설정
 st.set_page_config(page_title="RAG 챗봇", page_icon="🏢")
-st.title("🏢 생성형 AI 윤리 가이드 챗봇")
+st.title("🏢 인사규정 챗봇")
 
 # 세션 상태 초기화
 if "messages" not in st.session_state:
