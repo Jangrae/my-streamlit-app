@@ -32,7 +32,6 @@ def get_chain():
     1. 반드시 제공된 문서 내용(context)에 근거하여 답변하세요.
     2. 문서에 없는 내용은 추측하지 말고 "업로드된 문서에서 확인되지 않습니다."라고 답하세요.
     3. 답변은 간결하고 명확하게 작성하세요.
-    
     [문서]
     {context}"""
     h_msg = "{input}"
@@ -55,7 +54,7 @@ chain = get_chain()
 
 # 페이지 설정
 st.set_page_config(page_title="RAG 챗봇", page_icon="🏢")
-st.title("🏢 인사규정 챗봇")
+st.title("🏢 인사규정 챗 봇")
 
 # 세션 상태 초기화
 if "messages" not in st.session_state:
